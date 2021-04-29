@@ -42,6 +42,8 @@
 #include <ctype.h>
 #include <getopt.h>
 
+#include <graalvm/llvm/polyglot.h>
+
 #define TEST_READ_PATH "/dev/zero"
 #define TEST_READ_LEN 65536
 
@@ -61,8 +63,15 @@
 #error Unsupported platform: missing clock_gettime syscall number!
 #endif
 
-typedef _Bool bool;
 typedef void (*bench_impl)(void);
+
+struct CallbenchResults {
+    unsigned int time_syscall_ns;
+    unsigned int time_libc_ns;
+    unsigned int file_mmap_ns;
+    unsigned int file_read_ns;
+};
+POLYGLOT_DECLARE_STRUCT(CallbenchResults);
 
 static char test_read_buf[TEST_READ_LEN];
 
@@ -131,8 +140,6 @@ static long run_bench_ns(bench_impl inner_call, int calls, int loops, int rounds
             best_ns1 = best_ns2;
         }
 
-        putchar('.');
-        fflush(stdout);
         usleep(125 * MS_PER_USEC);
     }
 
@@ -143,134 +150,41 @@ static int default_arg(int arg, int def) {
     return arg == -1 ? def : arg;
 }
 
-static void bench_time(int calls, int loops, int rounds) {
+void benchTime(struct CallbenchResults *results, int calls, int loops, int rounds) {
     calls = default_arg(calls, 100000);
     loops = default_arg(loops, 32);
     rounds = default_arg(rounds, 5);
-
-    printf("clock_gettime: ");
-    fflush(stdout);
 
 #ifndef NO_DIRECT_SYSCALL
     long best_ns_syscall = run_bench_ns(time_syscall_mb, calls, loops, rounds);
 #endif
     long best_ns_libc = run_bench_ns(time_libc_mb, calls, loops, rounds);
 
-    putchar('\n');
-
 #ifdef NO_DIRECT_SYSCALL
-    printf("    syscall:\t<unsupported>\n");
+    results->time_syscall_ns = -1;
 #else
-    printf("    syscall:\t%ld ns\n", best_ns_syscall);
+    results->time_syscall_ns = best_ns_syscall;
 #endif
-    printf("    libc:\t%ld ns\n", best_ns_libc);
+    results->time_libc_ns = best_ns_libc;
 }
 
-static void bench_file(int calls, int loops, int rounds) {
+void benchFile(struct CallbenchResults *results, int calls, int loops, int rounds) {
     calls = default_arg(calls, 100);
     loops = default_arg(loops, 128);
     rounds = default_arg(rounds, 5);
 
-    printf("read file: ");
-    fflush(stdout);
-
     long best_ns_mmap = run_bench_ns(mmap_mb, calls, loops, rounds);
     long best_ns_read = run_bench_ns(file_mb, calls, loops, rounds);
 
-    printf("\n    mmap:\t%ld ns\n", best_ns_mmap);
-    printf("    read:\t%ld ns\n", best_ns_read);
+    results->file_mmap_ns = best_ns_mmap;
+    results->file_read_ns = best_ns_read;
 }
 
-static char *short_options = "hm:c:l:r:";
-static struct option long_options[] = {
-    {"help", no_argument, 0, 'h'},
-    {"mode", required_argument, 0, 'm'},
-    {"calls", required_argument, 0, 'c'},
-    {"loops", required_argument, 0, 'l'},
-    {"rounds", required_argument, 0, 'r'},
-    {}
-};
-
-static void print_help(char *prog_name) {
-    printf("Usage: %s [options]\n"
-        "\n"
-        "This program benchmarks some simple kernel syscalls:\n"
-        "  Time: clock_gettime(CLOCK_MONOTONIC) with direct syscalls and libc wrapper calls\n"
-        "  File: reads 64 KiB of data from /dev/zero with mmap(2) and read(2)\n"
-        "\n"
-        "libc time calls may be faster than direct syscalls on some platforms due to\n"
-        "special fast paths without context switching, e.g. Linux's vDSO.\n"
-        "\n"
-        "Options:\n"
-        "  -h, --help\tshow usage help and exit\n"
-        "  -m, --mode\ttests to run: time, file, or all (default: all)\n"
-        "  -c, --calls\tnumber of syscalls to make per loop (default: 100000 for time, 100 for file)\n"
-        "  -l, --loops\tnumber of loops to run per round (default: 32 for time, 128 for file)\n"
-        "  -r, --rounds\tnumber of benchmark rounds to run (default: 5)\n",
-        prog_name);
-
-    exit(1);
+struct CallbenchResults *allocResults() {
+    struct CallbenchResults *results = malloc(sizeof(*results));
+    return polyglot_from_CallbenchResults(results);
 }
 
-static void parse_args(int argc, char **argv, bool *do_time, bool *do_file, int *calls, int *loops, int *rounds) {
-    while (1) {
-        int c = getopt_long(argc, argv, short_options, long_options, NULL);
-        if (c == -1)
-            break;
-
-        switch (c) {
-        case '?':
-        case 'h':
-            print_help(argv[0]);
-            break;
-        case 'm':
-            if (!strcmp(optarg, "time")) {
-                *do_time = 1;
-                *do_file = 0;
-            } else if (!strcmp(optarg, "file")) {
-                *do_time = 0;
-                *do_file = 1;
-            } else if (!strcmp(optarg, "all")) {
-                *do_time = 1;
-                *do_file = 1;
-            } else {
-                fprintf(stderr, "%s: invalid mode -- '%s'\n", argv[0], optarg);
-                print_help(argv[0]);
-            }
-            break;
-        case 'c':
-            *calls = atoi(optarg);
-            break;
-        case 'l':
-            *loops = atoi(optarg);
-            break;
-        case 'r':
-            *rounds = atoi(optarg);
-            break;
-        }
-    }
-}
-
-int main(int argc, char** argv) {
-    bool do_time = 1;
-    bool do_file = 1;
-    int calls = -1;
-    int loops = -1;
-    int rounds = -1;
-
-    parse_args(argc, argv, &do_time, &do_file, &calls, &loops, &rounds);
-
-    if (do_time) {
-        bench_time(calls, loops, rounds);
-    }
-
-    if (do_time && do_file) {
-        putchar('\n');
-    }
-
-    if (do_file) {
-        bench_file(calls, loops, rounds);
-    }
-
-    return 0;
+void freeResults(struct CallbenchResults *results) {
+    free(results);
 }

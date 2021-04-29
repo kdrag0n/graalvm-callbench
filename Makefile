@@ -1,11 +1,11 @@
-CC = gcc
-CFLAGS = -Wall -O2
+CC = $(LLVM_TOOLCHAIN)/clang
+CFLAGS = -O2 -shared -fPIC -lgraalvm-llvm
 
-target = callbench
+target = libcallbench.so
 
 all: $(target)
 
-$(target): $(target).c Makefile
+$(target): core.c Makefile
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
